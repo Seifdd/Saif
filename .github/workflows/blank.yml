@@ -24,27 +24,28 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-        with:
-          cmdline-tools-version: '20.0'
-
       - name: Install Android SDK & NDK packages
         run: |
+          set -e
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
           SDKMANAGER="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
           yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
             "platform-tools" \
-            "platforms;android-34" \
-            "build-tools;34.0.0" \
+            "platforms;android-35" \
+            "build-tools;35.0.0" \
             "cmake;3.22.1" \
             "ndk;26.3.11579264"
 
       - name: Build Android APK
         run: |
+          set -e
           ANDROID_DIR=$(find unpacked_src -type d -name "android" | head -n 1)
           if [ -z "$ANDROID_DIR" ]; then
             echo "لم يتم العثور على مجلد android داخل الأرشيف"
+            exit 1
+          fi
+          if [ ! -f "$ANDROID_DIR/gradlew" ]; then
+            echo "ملف gradlew غير موجود في $ANDROID_DIR؛ هذا المشروع يستخدم سكريبتات/أدوات مثل tools/prepare.sh ولا يحتوي على مشروع Gradle جاهز"
             exit 1
           fi
           chmod +x "$ANDROID_DIR/gradlew"
@@ -52,6 +53,7 @@ jobs:
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
+        if: always()
         with:
           name: bo3-recomp-apk
           path: unpacked_src/**/android/app/build/outputs/apk/debug/*.apk
