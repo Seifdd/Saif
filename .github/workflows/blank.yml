@@ -65,19 +65,7 @@ jobs:
           "$BT/d8" --min-api 29 --output "$WORK/dex" $(find "$WORK/classes" -name '*.class')
 
           cp "$WORK/unsigned_base.apk" "$WORK/aligned.apk"
-          (cd "$WORK/dex" && "$BT/aapt2" add -v "$WORK/aligned.apk" classes*.dex) || true
-          # إذا لم يضف aapt2 classes.dex، نستخدم zip/jar لإضافته داخل APK
-          if command -v python3 >/dev/null 2>&1; then
-            python3 - "$WORK/aligned.apk" "$WORK/dex" <<'PY'
-import sys, zipfile, os
-apk_path, dex_dir = sys.argv[1], sys.argv[2]
-with zipfile.ZipFile(apk_path, 'a', compression=zipfile.ZIP_DEFLATED) as zf:
-    existing = set(zf.namelist())
-    for fn in sorted(os.listdir(dex_dir)):
-        if fn.endswith('.dex') and fn not in existing:
-            zf.write(os.path.join(dex_dir, fn), fn)
-PY
-          fi
+          (cd "$WORK/dex" && zip -u "$WORK/aligned.apk" classes*.dex)
 
           "$BT/zipalign" -f -p 4 "$WORK/aligned.apk" "$WORK/aligned_final.apk"
           KEYSTORE="$WORK/debug.keystore"
