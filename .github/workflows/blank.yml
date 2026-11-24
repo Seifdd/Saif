@@ -1,4 +1,4 @@
-name: Unpack Zip and Build APK
+name: Build Test APK from android folder
 
 on:
   workflow_dispatch:
@@ -14,6 +14,7 @@ jobs:
 
       - name: Unpack ZIP archive
         run: |
+          set -e
           mkdir -p unpacked_src
           unzip -o "*.zip" -d unpacked_src
           find unpacked_src -maxdepth 3 -ls
@@ -24,7 +25,7 @@ jobs:
           java-version: '17'
           distribution: 'temurin'
 
-      - name: Install Android SDK & NDK packages
+      - name: Install Android SDK & Build Tools
         run: |
           set -e
           SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
@@ -32,28 +33,76 @@ jobs:
           yes | "$SDKMANAGER" --sdk_root="$SDK_ROOT" \
             "platform-tools" \
             "platforms;android-35" \
-            "build-tools;35.0.0" \
-            "cmake;3.22.1" \
-            "ndk;26.3.11579264"
+            "build-tools;35.0.0"
 
-      - name: Build Android APK
+      - name: Compile and Package Test APK
         run: |
           set -e
-          ANDROID_DIR=$(find unpacked_src -type d -name "android" | head -n 1)
-          if [ -z "$ANDROID_DIR" ]; then
-            echo "لم يتم العثور على مجلد android داخل الأرشيف"
+          SRC_ROOT=$(find unpacked_src -type d -name "android" | head -n 1)
+          if [ -z "$SRC_ROOT" ]; then
+            echo "لم يتم العثور على مجلد android"
             exit 1
           fi
-          if [ ! -f "$ANDROID_DIR/gradlew" ]; then
-            echo "ملف gradlew غير موجود في $ANDROID_DIR؛ هذا المشروع يستخدم سكريبتات/أدوات مثل tools/prepare.sh ولا يحتوي على مشروع Gradle جاهز"
-            exit 1
-          fi
-          chmod +x "$ANDROID_DIR/gradlew"
-          (cd "$ANDROID_DIR" && ./gradlew assembleDebug --stacktrace)
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          BT="$SDK_ROOT/build-tools/35.0.0"
+          JAR="$SDK_ROOT/platforms/android-35/android.jar"
+          WORK="$RUNNER_TEMP/apk_build"
+          rm -rf "$WORK"
+          mkdir -p "$WORK/res_compiled" "$WORK/gen" "$WORK/classes" "$WORK/dex" "$WORK/out"
 
-      - name: Upload APK Artifact
+          "$BT/aapt2" compile --dir "$SRC_ROOT/res" -o "$WORK/res_compiled/"
+          "$BT/aapt2" link \
+            -o "$WORK/unsigned_base.apk" \
+            -I "$JAR" \
+            --manifest "$SRC_ROOT/AndroidManifest.xml" \
+            --min-sdk-version 29 \
+            --target-sdk-version 35 \
+            --java "$WORK/gen" \
+            "$WORK/res_compiled/"*.flat
+
+          find "$SRC_ROOT/src" "$WORK/gen" -name '*.java' > "$WORK/srcs.txt"
+          javac --release 17 -nowarn -classpath "$JAR" -d "$WORK/classes" @"$WORK/srcs.txt"
+          "$BT/d8" --min-api 29 --output "$WORK/dex" $(find "$WORK/classes" -name '*.class')
+
+          cp "$WORK/unsigned_base.apk" "$WORK/aligned.apk"
+          (cd "$WORK/dex" && "$BT/aapt2" add -v "$WORK/aligned.apk" classes*.dex) || true
+          # إذا لم يضف aapt2 classes.dex، نستخدم zip/jar لإضافته داخل APK
+          if command -v python3 >/dev/null 2>&1; then
+            python3 - "$WORK/aligned.apk" "$WORK/dex" <<'PY'
+import sys, zipfile, os
+apk_path, dex_dir = sys.argv[1], sys.argv[2]
+with zipfile.ZipFile(apk_path, 'a', compression=zipfile.ZIP_DEFLATED) as zf:
+    existing = set(zf.namelist())
+    for fn in sorted(os.listdir(dex_dir)):
+        if fn.endswith('.dex') and fn not in existing:
+            zf.write(os.path.join(dex_dir, fn), fn)
+PY
+          fi
+
+          "$BT/zipalign" -f -p 4 "$WORK/aligned.apk" "$WORK/aligned_final.apk"
+          KEYSTORE="$WORK/debug.keystore"
+          keytool -genkeypair -v \
+            -keystore "$KEYSTORE" \
+            -storepass android \
+            -keypass android \
+            -alias androiddebugkey \
+            -keyalg RSA \
+            -keysize 2048 \
+            -validity 10000 \
+            -dname "CN=Android Debug,O=Android,C=US"
+
+          "$BT/apksigner" sign \
+            --ks "$KEYSTORE" \
+            --ks-key-alias androiddebugkey \
+            --ks-pass pass:android \
+            --key-pass pass:android \
+            --out "$WORK/out/bo3-recomp-test-debug.apk" \
+            "$WORK/aligned_final.apk"
+
+          ls -lh "$WORK/out/bo3-recomp-test-debug.apk"
+
+      - name: Upload Test APK Artifact
         uses: actions/upload-artifact@v4
-        if: always()
         with:
-          name: bo3-recomp-apk
-          path: unpacked_src/**/android/app/build/outputs/apk/debug/*.apk
+          name: bo3-recomp-test-apk
+          path: /home/runner/work/_temp/apk_build/out/*.apk
